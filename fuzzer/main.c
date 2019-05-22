@@ -34,45 +34,106 @@ sgx_enclave_id_t create_enclave(void)
 int fault_fired = 0;
 void *ebase_address = NULL;
 int enc_size = 0;
-int working_window = 1;
+int working_window = 3;
+int loop_detection_c = 0;
+int progress_c= 0;
 
-#define SEQ_LEN 10
+#define SEQ_LEN 100
 void *seq[SEQ_LEN];
 
 
-void handle_in_enclave(void *base_adrs) {
-    int p_offset = (base_adrs - ebase_address) >> 12;
-
-    // enclave page in lower range
-    if (fault_fired > working_window && p_offset < 200)
-        mprotect(GET_PFN(seq[(fault_fired-working_window)%SEQ_LEN]), 4096, PROT_NONE);
-    if (p_offset < 200)
-        seq[fault_fired++ %SEQ_LEN] = base_adrs;
-    mprotect(GET_PFN(base_adrs), 4096, PROT_WRITE|PROT_READ|PROT_EXEC);
-    printf("pfn=%p, ba=%p, offset: %d\n", GET_PFN(base_adrs), base_adrs, p_offset);
+gprsgx_region_t get_enclave_regs(void) {
+    gprsgx_region_t gprsgx;
+    edbgrd(get_enclave_ssa_gprsgx_adrs(), &gprsgx, sizeof(gprsgx_region_t));
+    return gprsgx;
 
 }
 
-void handle_outside_enclave(void *base_adrs) {
-    if (fault_fired > working_window)
-        mprotect(GET_PFN(seq[(fault_fired-working_window)%SEQ_LEN]), 4096, PROT_NONE);
-    seq[fault_fired++ %SEQ_LEN] = base_adrs;
-    mprotect(GET_PFN(base_adrs), 4096, PROT_WRITE|PROT_READ|PROT_EXEC);
-    printf("out enclave: pfn=%p, ba=%p, loc: %d\n",
-            GET_PFN(base_adrs), base_adrs, base_adrs - GET_PFN(base_adrs));
-
+void print_working_set(void **seq, int window) {
+    uint64_t *pte = NULL;
+    for (int i=0; i <= window; i++) {
+        void *seq_address = seq[(fault_fired - window + i) % SEQ_LEN];
+        int offset =  (seq_address - ebase_address) >> 12;
+        pte = remap_page_table_level(seq_address, PTE);
+        printf("%d=%d ", offset, DIRTY(*pte)*2 + ACCESSED(*pte));
+        //print_pte_adrs(GET_PFN(seq_address));
+        //print_pte(pte);
+    };
+    printf("\n");
+    
 }
+
+int detect_loop(void *curr_adrs, int window) {
+    if (seq[(fault_fired-window-1) % SEQ_LEN] == curr_adrs) {
+        loop_detection_c++;
+    } else {
+        loop_detection_c = 0;
+    }
+    if (loop_detection_c > 100) {
+        loop_detection_c = 0;
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+int detect_progress() {
+    return (working_window == 4 && loop_detection_c > 30);
+
+    if (loop_detection_c > 40) {
+        progress_c++;
+    }
+    if (progress_c > 3) {
+        progress_c = 0;
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
 
 void fault_handler(void *base_adrs)
 {
+    fault_fired++;
+    mprotect(GET_PFN(seq[(fault_fired-working_window)%SEQ_LEN]), 4096, PROT_NONE);
+    seq[fault_fired %SEQ_LEN] = base_adrs;
+    mprotect(GET_PFN(base_adrs), 4096, PROT_WRITE|PROT_READ|PROT_EXEC);
+
+    if (detect_loop(base_adrs, working_window)){
+        working_window++;
+    }
+    /*
+    if (detect_progress()) {
+        working_window = (2 > working_window-1 ? 2 : working_window-1);
+        mprotect(GET_PFN(seq[(fault_fired-working_window)%SEQ_LEN]), 4096, PROT_NONE);
+    }
+    */
+
     if (ebase_address <= base_adrs && base_adrs <= ebase_address + enc_size) {
-        handle_in_enclave(base_adrs);
+        gprsgx_region_t regs = get_enclave_regs();
+
+        int p_offset = (base_adrs - ebase_address) >> 12;
+        int rip_offset = ((void *)regs.fields.rip - ebase_address);
+        int rsp_offset = ((void *)regs.fields.rsp - ebase_address);
+        printf("ba=%p, ", base_adrs);
+        printf("ff=%d, ", fault_fired);
+        printf("rip=%d, ", rip_offset);
+        printf("rsp=%d, ", rsp_offset);
+        printf("window=%d, ", working_window);
+        printf("lpd=%d, ", loop_detection_c);
+        printf("offset=%d", p_offset);
+        printf("\n");
+
+        if (working_window > 1)
+            print_working_set(seq, working_window);
     } else if (base_adrs == NULL) {
         printf("null pointer\n");
         abort();
     } else {
-        handle_outside_enclave(base_adrs);
+        printf("out enclave: pfn=%p, ba=%p, loc=%d\n",
+                GET_PFN(base_adrs), base_adrs, base_adrs - GET_PFN(base_adrs));
     }
+    fflush(0);
 
 }
 
@@ -93,6 +154,16 @@ void restore_memory(void *base_adrs, int size) {
         mprotect(base_adrs+i, 4096, PROT_WRITE|PROT_READ|PROT_EXEC); 
     }
     printf("restored %d addresses\n", size/0x1000);
+}
+
+void reset_ww() {
+    fault_fired = 0;
+    working_window = 1;
+    loop_detection_c = 0;
+
+    for (int i=0; i < SEQ_LEN; i++) {
+        seq[i] = 0;
+    }
 }
 
 int main( int argc, char **argv )
@@ -119,7 +190,8 @@ int main( int argc, char **argv )
     char *buffer = (char *) malloc(0x4000);
 
 
-    fault_fired = 0;
+    fflush(0);
+    reset_ww();
     getchar();
     protect_memory(get_enclave_base(), get_enclave_size());
     cipher = rand();
@@ -127,7 +199,8 @@ int main( int argc, char **argv )
     printf("pagefaults: %d\n", fault_fired);
 
 
-    fault_fired = 0;
+    fflush(0);
+    reset_ww();
     getchar();
     protect_memory(get_enclave_base(), get_enclave_size());
     for (int i=0; i < 99; i++)
@@ -139,7 +212,8 @@ int main( int argc, char **argv )
     SGX_ASSERT_E( ecall_write_to_buffer(eid, buffer, 0x2001) );
     printf("pagefaults: %d\n", fault_fired);
 
-    fault_fired = 0;
+    fflush(0);
+    reset_ww();
     getchar();
     protect_memory(get_enclave_base(), get_enclave_size());
     buffer[0] = 10;
