@@ -2,11 +2,12 @@
 #include "debug.h"
 #include "pf.h"
 #include <sys/mman.h>
+#include <time.h>
 
 /* SGX untrusted runtime */
 #include <sgx_urts.h>
 #include "Enclave/encl_u.h"
-
+#include "plug.h"
 
 #include "libsgxstep/apic.h"
 #include "libsgxstep/pt.h"
@@ -16,6 +17,7 @@
 #include "libsgxstep/config.h"
 #include "libsgxstep/idt.h"
 #include "libsgxstep/config.h"
+#include "libsgxstep/cpu.h"
 
 
 sgx_enclave_id_t create_enclave(void)
@@ -25,7 +27,7 @@ sgx_enclave_id_t create_enclave(void)
     sgx_enclave_id_t eid = -1;
 
     info_event("Creating enclave...");
-    SGX_ASSERT_E( sgx_create_enclave( "./Enclave/encl.so", /*debug=*/1,
+    SGX_ASSERT_E( sgx_create_enclave( ENCLAVE_SO, /*debug=*/1, //"./Enclave/encl.so", /*debug=*/1,
                                     &token, &updated, &eid, NULL ) );
 
     return eid;
@@ -34,9 +36,22 @@ sgx_enclave_id_t create_enclave(void)
 int fault_fired = 0;
 void *ebase_address = NULL;
 int enc_size = 0;
-int working_window = 3;
+int working_window = 4;
 int loop_detection_c = 0;
 int progress_c= 0;
+int call_runs = 0;
+
+
+typedef struct pf_info_frame {
+    void* base_adrs;
+    int call_runs;
+    int fault_fired;
+    int rip_offset;
+    int rsp_offset;
+    int working_window;
+    int loop_detection_c;
+    int p_offset;
+} pf_info_frame;
 
 #define SEQ_LEN 100
 void *seq[SEQ_LEN];
@@ -56,11 +71,19 @@ void print_working_set(void **seq, int window) {
         int offset =  (seq_address - ebase_address) >> 12;
         pte = remap_page_table_level(seq_address, PTE);
         printf("%d=%d ", offset, DIRTY(*pte)*2 + ACCESSED(*pte));
-        //print_pte_adrs(GET_PFN(seq_address));
-        //print_pte(pte);
+        *pte = MARK_CLEAN(*pte);
+        *pte = MARK_NOT_ACCESSED(*pte);
+        free_map(pte);
     };
     printf("\n");
     
+}
+
+void reset_da_bits(void *adrs) {
+    uint64_t *pte = remap_page_table_level(adrs, PTE);
+    *pte = MARK_CLEAN(*pte);
+    *pte = MARK_NOT_ACCESSED(*pte);
+    free_map(pte);
 }
 
 int detect_loop(void *curr_adrs, int window) {
@@ -91,13 +114,28 @@ int detect_progress() {
     }
 }
 
+void print_pf_info_frame (pf_info_frame p) {
+    printf("ba=%p, ", p.base_adrs);
+    printf("run=%d, ", p.call_runs);
+    printf("ff=%d, ", p.fault_fired);
+    printf("rip=%d, ", p.rip_offset);
+    printf("rsp=%d, ", p.rsp_offset);
+    printf("window=%d, ", p.working_window);
+    printf("lpd=%d, ", p.loop_detection_c);
+    printf("offset=%d", p.p_offset);
+    printf("\n");
+}
 
 void fault_handler(void *base_adrs)
 {
     fault_fired++;
+
     mprotect(GET_PFN(seq[(fault_fired-working_window)%SEQ_LEN]), 4096, PROT_NONE);
     seq[fault_fired %SEQ_LEN] = base_adrs;
     mprotect(GET_PFN(base_adrs), 4096, PROT_WRITE|PROT_READ|PROT_EXEC);
+
+    // reset dirty/access bits
+    reset_da_bits(GET_PFN(base_adrs));
 
     if (detect_loop(base_adrs, working_window)){
         working_window++;
@@ -115,23 +153,25 @@ void fault_handler(void *base_adrs)
         int p_offset = (base_adrs - ebase_address) >> 12;
         int rip_offset = ((void *)regs.fields.rip - ebase_address);
         int rsp_offset = ((void *)regs.fields.rsp - ebase_address);
-        printf("ba=%p, ", base_adrs);
-        printf("ff=%d, ", fault_fired);
-        printf("rip=%d, ", rip_offset);
-        printf("rsp=%d, ", rsp_offset);
-        printf("window=%d, ", working_window);
-        printf("lpd=%d, ", loop_detection_c);
-        printf("offset=%d", p_offset);
-        printf("\n");
-
+        pf_info_frame pf_frame = {
+            base_adrs,
+            call_runs,
+            fault_fired,
+            rip_offset,
+            rsp_offset,
+            working_window,
+            loop_detection_c,
+            p_offset
+        };
+        print_pf_info_frame(pf_frame);
         if (working_window > 1)
             print_working_set(seq, working_window);
     } else if (base_adrs == NULL) {
         printf("null pointer\n");
         abort();
     } else {
-        printf("out enclave: pfn=%p, ba=%p, loc=%d\n",
-                GET_PFN(base_adrs), base_adrs, base_adrs - GET_PFN(base_adrs));
+        printf("out enclave: ba=%p\n", base_adrs);
+        fault_fired--;
     }
     fflush(0);
 
@@ -166,6 +206,7 @@ void reset_ww() {
     }
 }
 
+
 int main( int argc, char **argv )
 {
     sgx_enclave_id_t eid = create_enclave();
@@ -179,53 +220,28 @@ int main( int argc, char **argv )
     ebase_address = get_enclave_base();
     enc_size = get_enclave_size();
 
-    // randomthings
+    // set seed rng
     srand(1);
+    srand(time(NULL));
+
+    setup_plug(eid, enc_size, ebase_address);
 
 
-    /* ---------------------------------------------------------------------- */
+    /* --------------------------------------------------------------------- */
 
-    int rv = 1;
-    int cipher, plain;
-    char *buffer = (char *) malloc(0x4000);
+    
+    for (;;) {
 
+        fflush(0);
+        reset_ww();
+        getchar(); //PAUSE
+        protect_memory(get_enclave_base(), get_enclave_size());
+        call_encl_f(eid);
+        printf("pagefaults: %d\n", fault_fired);
+        call_runs++;
 
-    fflush(0);
-    reset_ww();
-    getchar();
-    protect_memory(get_enclave_base(), get_enclave_size());
-    cipher = rand();
-    SGX_ASSERT_E( ecall_rsa_decode(eid, &plain, cipher) );
-    printf("pagefaults: %d\n", fault_fired);
-
-
-    fflush(0);
-    reset_ww();
-    getchar();
-    protect_memory(get_enclave_base(), get_enclave_size());
-    for (int i=0; i < 99; i++)
-        buffer[i] = 'A';
-    buffer[99] = 0x00;
-    ASSERT( !mprotect(GET_PFN(buffer), 0x4000, PROT_NONE) );
-    // ocall on same page as segfault handler?
-    //ASSERT( !mprotect(GET_PFN(ocall_print), 4096, PROT_NONE) );
-    SGX_ASSERT_E( ecall_write_to_buffer(eid, buffer, 0x2001) );
-    printf("pagefaults: %d\n", fault_fired);
-
-    fflush(0);
-    reset_ww();
-    getchar();
-    protect_memory(get_enclave_base(), get_enclave_size());
-    buffer[0] = 10;
-    for (int i=1; i < 99; i++)
-        buffer[i] = 'A';
-    buffer[99] = 0x00;
-    ASSERT( !mprotect(GET_PFN(buffer), 0x4000, PROT_NONE) );
-    SGX_ASSERT_E( ecall_do_unsafe_bufcopy(eid, &rv, buffer) );
-    printf("pagefaults: %d\n", fault_fired);
-
-    /* ---------------------------------------------------------------------- */
-
+    }
+    
 
     restore_memory(get_enclave_base(), get_enclave_size());
     info_event("destroying SGX enclave");
@@ -233,10 +249,5 @@ int main( int argc, char **argv )
 
     info("all is well; exiting..");
 	return 0;
-}
-
-
-void ocall_print(char *p) {
-	printf("%s\n", p);
 }
 
