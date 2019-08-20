@@ -1,0 +1,16 @@
+enclave {
+	
+	trusted {
+        /* define ECALLs here. */
+        public int ecall_dummy(int i);
+
+        /* =========================== START SOLUTION =========================== */
+        public int ecall_get_secret([out] int *secret_constant,[in,string] char *pwd);
+        /* ============================ END SOLUTION ============================ */
+    };
+	
+	untrusted {
+        /* define OCALLs here. */
+        void ocall_print([in,string] const char *str);
+	};
+};

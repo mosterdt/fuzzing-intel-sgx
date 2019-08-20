@@ -1,0 +1,29 @@
+
+;; Function ecall_dummy (null)
+;; enabled by -tree-original
+
+
+{
+  # DEBUG BEGIN STMT;
+  {
+    int i = 0;
+
+    # DEBUG BEGIN STMT;
+        int i = 0;
+    goto <D.2488>;
+    <D.2487>:;
+    # DEBUG BEGIN STMT;
+    if (i == 2)
+      {
+        # DEBUG BEGIN STMT;
+        j++ ;
+      }
+    i++ ;
+    <D.2488>:;
+    if (i <= 4) goto <D.2487>; else goto <D.2489>;
+    <D.2489>:;
+  }
+  # DEBUG BEGIN STMT;
+  return super_secret_constant + j;
+}
+
