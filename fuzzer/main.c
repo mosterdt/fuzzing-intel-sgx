@@ -209,6 +209,15 @@ void reset_ww() {
 
 int main( int argc, char **argv )
 {
+    int runs;
+    if (argc == 2){
+        //char *a = argv[1]
+        runs = atoi(argv[1]);
+    } else {
+        runs = 1000;
+    }
+    printf("doing %d runs\n", runs);
+
     sgx_enclave_id_t eid = create_enclave();
 
     info("registering fault handler..");
@@ -230,11 +239,11 @@ int main( int argc, char **argv )
     /* --------------------------------------------------------------------- */
 
     
-    for (;;) {
+    for (int i=0;i<runs; i++) {
 
         fflush(0);
         reset_ww();
-        getchar(); //PAUSE
+        //getchar(); //PAUSE
         protect_memory(get_enclave_base(), get_enclave_size());
         call_encl_f(eid);
         printf("pagefaults: %d\n", fault_fired);

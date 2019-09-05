@@ -1,6 +1,6 @@
 # Intel SGX Enclave Fuzzer
 
-This code was used in the [`Fuzzing Intel SGX Enclaves`](https://u.debacker.me/Thomas_De_BackerFuzzing_Intel_SGX_enclaves.pdf) masterthesis.
+This code was used in the [Fuzzing Intel SGX Enclaves](https://u.debacker.me/Thomas_De_BackerFuzzing_Intel_SGX_enclaves.pdf) masterthesis.
 
 ## Installation
 * Get the Intel SGX SDK.

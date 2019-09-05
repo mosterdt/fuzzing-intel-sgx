@@ -2,9 +2,9 @@ LIBSGXSTEP_DIR       = /home/thomas/kuleuven/thesis/sgx-step
 LIBSGXSTEP           = $(LIBSGXSTEP_DIR)/libsgxstep
 
 #ENCLAVE_D            = ../enclave-examples/enclave-buffer
-ENCLAVE_D            = ../enclave-examples/002-sgx-inc-secret
+#ENCLAVE_D            = ../enclave-examples/002-sgx-inc-secret
 #ENCLAVE_D            = ../enclave-examples/004-sgx-secstr
-#ENCLAVE_D            = ../enclave-examples/005-sgx-rsa
+ENCLAVE_D            = ../enclave-examples/005-sgx-rsa
 #ENCLAVE_D            = ../enclave-examples/enclave-edger8r
 ENCLAVE              = $(ENCLAVE_D)/Enclave
 SUBDIRS              = $(ENCLAVE) $(LIBSGXSTEP)
